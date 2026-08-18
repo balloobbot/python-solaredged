@@ -1165,8 +1165,8 @@ async def test_one_meter_failing_leaves_the_others_fresh(
     mock_modbus_unit.fail_read(40123, IllegalDataAddressError())
     report = await client.async_update()
 
-    assert set(report.failed) == {"meter_1"}
-    assert "meter_2" in report.updated
+    assert set(report.failed) == {"meters[0]"}
+    assert "meters[1]" in report.updated
     assert client.meters[1].ac_power is not None
 
 

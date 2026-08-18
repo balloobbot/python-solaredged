@@ -49,6 +49,8 @@ from .const import (
 from .exceptions import SolarEdgeConnectionError, SolarEdgeError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from modbus_connection import ModbusUnit
     from modbus_connection.model import Component
 
@@ -65,14 +67,22 @@ _METER_DIDS = frozenset(
 if TYPE_CHECKING:
     _Pollable = Component | ComponentGroup
 
+# Sub-systems polled on their own, named by the attribute holding each. A name
+# holding None is absent on this device; one holding a list is polled per item,
+# so a single failing meter cannot blank the others.
+_READINGS = ("common", "inverter", "mmppt", "meters", "batteries")
+_SETTINGS = ("site_control", "power_control", "advanced_power_control")
+
+# The names above holding a list of sub-systems rather than one.
+_LISTS = frozenset({"meters", "batteries"})
+
 
 @dataclass(frozen=True)
 class UpdateReport:
     """What one poll refreshed, named by sub-system.
 
-    A sub-system in ``failed`` kept the values it had; the error that refused
-    it rides along. A dead link never appears here, because the poll raises
-    instead of reporting partial silence.
+    A sub-system in ``failed`` kept the values it had. A dead link never
+    appears here: the poll raises rather than report partial silence.
     """
 
     updated: set[str]
@@ -149,7 +159,16 @@ class SolarEdge:
             AdvancedPowerControl(unit) if advanced_power_control else None
         )
 
-        self._readings, self._settings = self._build_domains(unit)
+        # Export control's read already spans the storage control block, so
+        # the two are read together for the price of one. Blocks that merely
+        # sit back to back are left apart, which buys failure isolation for
+        # nothing.
+        overlapping = [c for c in (self.storage_control, self.export_control) if c]
+        self.site_control: _Pollable | None = (
+            ComponentGroup(unit, overlapping) if len(overlapping) > 1 else None
+        )
+        if self.site_control is None and overlapping:
+            self.site_control = overlapping[0]
 
     @property
     def components(self) -> list[Component]:
@@ -173,56 +192,6 @@ class SolarEdge:
 
         return parts
 
-    def _build_domains(
-        self, unit: ModbusUnit
-    ) -> tuple[list[tuple[str, _Pollable]], list[tuple[str, _Pollable]]]:
-        """Group the components into the units a single read can lose.
-
-        Returns the readings and the settings apart. Each entry is polled on
-        its own, so a block one sub-system refuses cannot blank the rest. Two
-        components share a read only where one of them already spans the
-        other's registers, which costs nothing: the export and storage control
-        blocks overlap. Blocks that merely sit back to back, like the SunSpec
-        models tiling the inverter chain, are left apart, because merging them
-        would trade isolation for nothing.
-        """
-        readings: list[tuple[str, _Pollable]] = [
-            ("common", self.common),
-            ("inverter", self.inverter),
-        ]
-        if self.mmppt is not None:
-            readings.append(("mmppt", self.mmppt))
-
-        readings.extend(
-            (f"meter_{index}", meter) for index, meter in enumerate(self.meters, 1)
-        )
-        readings.extend(
-            (f"battery_{index}", battery)
-            for index, battery in enumerate(self.batteries, 1)
-        )
-
-        settings: list[tuple[str, _Pollable]] = []
-
-        # The export control block's read spans the storage control block, so
-        # the two are read together for the price of one.
-        overlapping = [
-            control
-            for control in (self.storage_control, self.export_control)
-            if control is not None
-        ]
-        if len(overlapping) > 1:
-            settings.append(("site_control", ComponentGroup(unit, overlapping)))
-        elif overlapping:
-            name = "storage_control" if self.storage_control else "export_control"
-            settings.append((name, overlapping[0]))
-
-        if self.power_control is not None:
-            settings.append(("power_control", self.power_control))
-        if self.advanced_power_control is not None:
-            settings.append(("advanced_power_control", self.advanced_power_control))
-
-        return readings, settings
-
     @property
     def is_ev_charger(self) -> bool | None:
         """Whether this unit is actually a SolarEdge EV charger, not an inverter.
@@ -240,64 +209,38 @@ class SolarEdge:
         return model.startswith(EV_CHARGER_MODEL_PREFIX)
 
     async def async_update_readings(self) -> UpdateReport:
-        """Refresh what the device measures: the inverter, meters and batteries.
-
-        Everything that moves on its own. The control blocks are not in here,
-        so a caller polling readings alone sees the settings it last read.
-        """
-        return await self._async_poll(self._readings)
+        """Refresh what the device measures: the inverter, meters and batteries."""
+        return await self._async_poll(_READINGS)
 
     async def async_update_settings(self) -> UpdateReport:
-        """Refresh the control blocks: storage, export and power control.
-
-        These change when something writes them, not on their own, so a caller
-        may poll them on a slower interval than the readings, and again after
-        writing one.
-        """
-        return await self._async_poll(self._settings)
+        """Refresh the control blocks, which move only when something writes them."""
+        return await self._async_poll(_SETTINGS)
 
     async def async_update(self) -> UpdateReport:
-        """Refresh readings and settings together, in one report.
+        """Refresh readings and settings together, in one report."""
+        report = await self._async_poll((*_READINGS, *_SETTINGS))
 
-        For a caller that does not want to schedule the two apart. A sub-system
-        whose block the device refuses keeps its previous values while the rest
-        still refresh, so one failing meter or battery no longer blanks the
-        inverter. The refusal rides along on the returned report.
-
-        Raises :class:`SolarEdgeConnectionError` when the link is gone, when
-        nothing answered at all, or when the device answers without a valid
-        inverter identity.
-        """
-        report = await self._async_poll([*self._readings, *self._settings])
-
-        # The inverter model id is always populated on a real device. A device
-        # that answers the poll but reports a bogus identity (a zero or unknown
-        # model id decoding to None) would otherwise present as a silently-blank
-        # inverter, so surface that as a read failure.
+        # A device that answers the poll but reports a bogus identity (a zero
+        # or unknown model id decoding to None) would otherwise present as a
+        # silently-blank inverter.
         if "inverter" in report.updated and self.inverter.did is None:
             msg = "Device returned no valid inverter data"
             raise SolarEdgeConnectionError(msg)
 
         return report
 
-    async def _async_poll(self, domains: list[tuple[str, _Pollable]]) -> UpdateReport:
-        """Read each failure domain on its own, collecting what happened.
-
-        A dead link aborts the poll: every remaining domain would only wait for
-        the same failure. So does a timeout with nothing read yet, because a
-        silent device would otherwise be walked domain by domain at a full
-        timeout each. Once something has answered, a timeout is that domain's
-        problem and is reported like any other refusal.
-        """
+    async def _async_poll(self, names: tuple[str, ...]) -> UpdateReport:
+        """Read each sub-system on its own, collecting what happened."""
         updated: set[str] = set()
         failed: dict[str, SolarEdgeError] = {}
 
-        for name, target in domains:
+        for name, target in self._targets(names):
             try:
                 await target.async_update()
             except ModbusConnectionError as err:
                 raise SolarEdgeConnectionError(str(err)) from err
             except ModbusTimeoutError as err:
+                # Nothing has answered, so the rest would only pay a timeout each.
                 if not updated and not failed:
                     raise SolarEdgeConnectionError(str(err)) from err
                 failed[name] = SolarEdgeConnectionError(str(err))
@@ -308,15 +251,21 @@ class SolarEdge:
 
         return UpdateReport(updated=updated, failed=failed)
 
-    async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
-        """Every register this device reads, undecoded, for diagnostics.
+    def _targets(self, names: tuple[str, ...]) -> Iterator[tuple[str, _Pollable]]:
+        """Yield the named sub-systems, skipping the ones this device lacks."""
+        for name in names:
+            if name in _LISTS:
+                parts: list[_Pollable] = getattr(self, name)
+                yield from ((f"{name}[{i}]", part) for i, part in enumerate(parts))
+                continue
+            target: _Pollable | None = getattr(self, name)
+            if target is not None:
+                yield name, target
 
-        Covers the detected layout rather than a fixed block list, so the dump
-        follows the meters, batteries and control blocks the probe found. The
-        fields refresh, but a dump is not a poll, so it fires no listeners.
-        """
+    async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
+        """Every register this device reads, undecoded, for diagnostics."""
         raw: dict[str, dict[int, int | bool]] = {}
-        for _name, target in (*self._readings, *self._settings):
+        for _name, target in self._targets((*_READINGS, *_SETTINGS)):
             try:
                 read = await target.async_read_raw(notify=False)
             except ModbusError as err:
