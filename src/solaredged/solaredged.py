@@ -5,7 +5,11 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from modbus_connection import ModbusError, ModbusExceptionError
+from modbus_connection import (
+    IllegalDataAddressError,
+    IllegalFunctionError,
+    ModbusError,
+)
 from modbus_connection.decode import combine_words, decode_float32
 from modbus_connection.model import ComponentGroup
 
@@ -225,7 +229,7 @@ class SolarEdge:
             header = await unit.read_holding_registers(
                 MMPPT_BASE, MMPPT_UNITS_OFFSET + 1
             )
-        except ModbusExceptionError:
+        except (IllegalDataAddressError, IllegalFunctionError):
             return 0
 
         modules = header[MMPPT_UNITS_OFFSET]
@@ -244,7 +248,7 @@ class SolarEdge:
             address = base + METER_STRIDE * index
             try:
                 did = (await unit.read_holding_registers(address, 1))[0]
-            except ModbusExceptionError:
+            except (IllegalDataAddressError, IllegalFunctionError):
                 break
 
             if did not in _METER_DIDS:
@@ -266,7 +270,7 @@ class SolarEdge:
             address = rated_energy_base + offset
             try:
                 words = await unit.read_holding_registers(address, 2)
-            except ModbusExceptionError:
+            except (IllegalDataAddressError, IllegalFunctionError):
                 break
 
             rated = decode_float32(words, word_order="little")
@@ -287,6 +291,6 @@ class SolarEdge:
         """
         try:
             await unit.read_holding_registers(address, 1)
-        except ModbusExceptionError:
+        except (IllegalDataAddressError, IllegalFunctionError):
             return False
         return True

@@ -8,7 +8,11 @@ import sys
 from typing import TYPE_CHECKING, Annotated
 
 import typer
-from modbus_connection import ModbusError, ModbusExceptionError
+from modbus_connection import (
+    IllegalDataAddressError,
+    IllegalFunctionError,
+    ModbusError,
+)
 from modbus_connection.tmodbus import connect_tcp
 from rich.console import Console
 from rich.panel import Panel
@@ -449,9 +453,9 @@ async def dump_command(
         for base, count in _DUMP_BLOCKS:
             try:
                 regs = await modbus_unit.read_holding_registers(base, count)
-            except ModbusExceptionError:
-                # Block not implemented on this device; skip it. A transport
-                # failure is a different error and propagates below.
+            except (IllegalDataAddressError, IllegalFunctionError):
+                # Block not implemented on this device; skip it. Any other
+                # exception response is a fault and propagates below.
                 continue
             for offset, value in enumerate(regs):
                 holding[str(base + offset)] = value

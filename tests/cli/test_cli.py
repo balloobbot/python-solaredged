@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from modbus_connection import (
+    IllegalDataAddressError,
     ModbusConnectionError,
-    ModbusExceptionError,
     ModbusTimeoutError,
 )
 from modbus_connection.decode import decode_float32
@@ -70,7 +70,7 @@ class _PrunedUnit:
 
     async def read_holding_registers(self, address: int, count: int) -> list[int]:
         if address in self._absent:
-            raise ModbusExceptionError(2)
+            raise IllegalDataAddressError
         return await self._inner.read_holding_registers(address, count)
 
     def __getattr__(self, name: str) -> object:
@@ -99,7 +99,7 @@ class _Empty:
     """A unit that answers every read with an illegal-data-address."""
 
     async def read_holding_registers(self, _address: int, _count: int) -> list[int]:
-        raise ModbusExceptionError(2)
+        raise IllegalDataAddressError
 
 
 def _connect_returning(conn: object) -> Callable[..., object]:

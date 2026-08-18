@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from modbus_connection import (
+    IllegalDataAddressError,
     ModbusConnectionError,
     ModbusExceptionError,
     ModbusTimeoutError,
+    ServerDeviceFailureError,
 )
 from modbus_connection.decode import decode_float32
 from modbus_connection.encode import encode_float32, encode_int
@@ -154,7 +156,7 @@ class _PickyUnit:
     ) -> None:
         self._inner = inner
         self._fail_at = fail_at
-        self._error = error or ModbusExceptionError(2)
+        self._error = error or IllegalDataAddressError()
 
     async def read_holding_registers(self, address: int, count: int) -> list[int]:
         if address in self._fail_at:
@@ -497,10 +499,21 @@ async def test_grid_status(mock_modbus_unit: MockModbusUnit) -> None:
     assert client.inverter.on_grid is False
 
 
+async def test_device_fault_while_probing_is_not_an_absent_block(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """A device fault during the probe surfaces, rather than reading as absent."""
+    seed(mock_modbus_unit, FIXTURE)
+    mock_modbus_unit.fail_read(40113, ServerDeviceFailureError())
+
+    with pytest.raises(SolarEdgeConnectionError):
+        await SolarEdge.async_probe(mock_modbus_unit)
+
+
 async def test_grid_status_extension_absent(mock_modbus_unit: MockModbusUnit) -> None:
     """Firmware without the grid status extension still probes and polls."""
     seed(mock_modbus_unit, FIXTURE)
-    mock_modbus_unit.fail_read(40113, ModbusExceptionError(2, "illegal data address"))
+    mock_modbus_unit.fail_read(40113, IllegalDataAddressError())
 
     client = await SolarEdge.async_probe(mock_modbus_unit)
     assert not isinstance(client.inverter, InverterExtended)
