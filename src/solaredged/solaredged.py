@@ -308,6 +308,23 @@ class SolarEdge:
 
         return UpdateReport(updated=updated, failed=failed)
 
+    async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
+        """Every register this device reads, undecoded, for diagnostics.
+
+        Covers the detected layout rather than a fixed block list, so the dump
+        follows the meters, batteries and control blocks the probe found. The
+        fields refresh, but a dump is not a poll, so it fires no listeners.
+        """
+        raw: dict[str, dict[int, int | bool]] = {}
+        for _name, target in (*self._readings, *self._settings):
+            try:
+                read = await target.async_read_raw(notify=False)
+            except ModbusError as err:
+                raise SolarEdgeConnectionError(str(err)) from err
+            for space, values in read.items():
+                raw.setdefault(space, {}).update(values)
+        return raw
+
     @classmethod
     async def async_probe(cls, unit: ModbusUnit) -> SolarEdge:
         """Detect the device layout on ``unit`` and return a ready instance.

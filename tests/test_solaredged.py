@@ -1074,6 +1074,25 @@ async def test_update_blank_inverter_block_raises(
         await client.async_update()
 
 
+async def test_read_raw_covers_the_detected_layout(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """The dump follows the probed layout, and reports a refusal as an error."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+
+    raw = await client.async_read_raw()
+
+    assert set(raw) == {"holding"}
+    # The inverter identity and a control block both land in the same dump.
+    assert 40004 in raw["holding"]
+    assert 57348 in raw["holding"]
+
+    mock_modbus_unit.fail_read(40004, IllegalDataAddressError())
+    with pytest.raises(SolarEdgeConnectionError):
+        await client.async_read_raw()
+
+
 async def test_readings_and_settings_poll_their_own_blocks(
     mock_modbus_unit: MockModbusUnit,
 ) -> None:
