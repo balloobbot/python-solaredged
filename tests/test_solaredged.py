@@ -1074,25 +1074,92 @@ async def test_update_blank_inverter_block_raises(
         await client.async_update()
 
 
-async def test_update_partial_block_read_raises(
+async def test_a_slow_sub_system_is_reported_once_something_answered(
     mock_modbus_unit: MockModbusUnit,
 ) -> None:
-    """A block refused mid-poll surfaces as a connection error, not silent None.
-
-    modbus-connection raises on a partial block read rather than blanking the
-    values that did not come back (a ``BlockReadError``, itself a ``ModbusError``).
-    Here the always-present inverter block is refused after a clean probe, and
-    ``async_update`` wraps that as a connection error instead of handing back a
-    half-empty device.
-    """
+    """A timeout after a good read fails one sub-system, not the whole poll."""
     seed(mock_modbus_unit, FIXTURE)
     client = await SolarEdge.async_probe(mock_modbus_unit)
+    await client.async_update()
 
-    # Refuse any pooled read that spans the inverter model block.
-    mock_modbus_unit.fail_read(40069, ModbusExceptionError(4))
+    # The identity block is read first, so something has answered by the time
+    # the inverter block times out.
+    mock_modbus_unit.fail_read(40069, ModbusTimeoutError("slow inverter block"))
+    report = await client.async_update()
+
+    assert set(report.failed) == {"inverter"}
+    assert "common" in report.updated
+
+
+async def test_a_silent_device_raises_on_the_first_sub_system(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """Nothing answered, so the rest would only pay a timeout each."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+    mock_modbus_unit.fail_requests(ModbusTimeoutError("device asleep"))
 
     with pytest.raises(SolarEdgeConnectionError):
         await client.async_update()
+
+
+async def test_one_meter_failing_leaves_the_others_fresh(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """Each meter is its own failure domain, so one refusal spares the rest."""
+    seed(mock_modbus_unit, "community/issue827_u1.json")
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+    await client.async_update()
+    assert len(client.meters) > 1
+
+    mock_modbus_unit.fail_read(40123, IllegalDataAddressError())
+    report = await client.async_update()
+
+    assert set(report.failed) == {"meter_1"}
+    assert "meter_2" in report.updated
+    assert client.meters[1].ac_power is not None
+
+
+async def test_the_overlapping_control_blocks_share_one_read(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """Export control's read spans storage control, so the two read together."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+    assert client.storage_control is not None
+    assert client.export_control is not None
+
+    await client.async_update()
+    mock_modbus_unit.read_events.clear()
+    report = await client.async_update()
+
+    assert "site_control" in report.updated
+    control_reads = [
+        event
+        for event in mock_modbus_unit.read_events
+        if 57344 <= event.address <= 57363
+    ]
+    assert len(control_reads) == 1
+
+
+async def test_a_refused_block_is_reported_not_raised(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """A block refused mid-poll fails its own sub-system and leaves the rest."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+    await client.async_update()
+
+    mock_modbus_unit.fail_read(40069, ModbusExceptionError(4))
+    report = await client.async_update()
+
+    assert not report.complete
+    assert set(report.failed) == {"inverter"}
+    assert isinstance(report.failed["inverter"], SolarEdgeConnectionError)
+
+    # The identity block sits in its own read, so it still refreshed.
+    assert "common" in report.updated
+    assert client.common.manufacturer is not None
 
 
 async def test_update_wraps_connection_error(
