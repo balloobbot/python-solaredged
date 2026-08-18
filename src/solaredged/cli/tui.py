@@ -388,7 +388,7 @@ class SolarEdgeTuiApp(App[None]):
                             await connection.close()
 
                     # Probe succeeded: take ownership so on_unmount can close it.
-                    self._connection = connection  # ty: ignore[invalid-assignment]
+                    self._connection = connection
                     self._client = client
 
                 await self._client.async_update()

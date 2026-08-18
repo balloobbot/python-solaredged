@@ -299,7 +299,7 @@ def test_info_connection_error(
     patch_connect: Callable[[], MockModbusConnection],
 ) -> None:
     """A dropped connection makes the command exit non-zero."""
-    patch_connect().simulate_connection_lost()
+    patch_connect().for_unit(1).fail_requests(ModbusConnectionError())
     result = runner.invoke(cli, ["info", "--host", "inverter.local"])
     assert result.exit_code != 0
 
@@ -482,7 +482,7 @@ def test_dump_transport_failure(
     patch_connect: Callable[[], MockModbusConnection],
 ) -> None:
     """A transport failure mid-dump (not a missing block) exits non-zero."""
-    patch_connect().simulate_connection_lost()
+    patch_connect().for_unit(1).fail_requests(ModbusConnectionError())
     result = runner.invoke(cli, ["dump", "--host", "inverter.local"])
     assert result.exit_code != 0
 

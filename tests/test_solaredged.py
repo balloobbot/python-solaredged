@@ -36,7 +36,7 @@ from .conftest import seed
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from modbus_connection.mock import MockModbusConnection, MockModbusUnit
+    from modbus_connection.mock import MockModbusUnit
 
     from solaredged.components import Component
 
@@ -708,13 +708,13 @@ async def test_export_mode_unimplemented_is_none(
 
 
 async def test_direct_write_registers_wraps_connection_error(
-    mock_modbus_connection: MockModbusConnection, mock_modbus_unit: MockModbusUnit
+    mock_modbus_unit: MockModbusUnit,
 ) -> None:
     """A failed multi-register control write (set_enabled) wraps the backend error."""
     seed(mock_modbus_unit, FIXTURE)
     client = await SolarEdge.async_probe(mock_modbus_unit)
     assert client.advanced_power_control is not None
-    mock_modbus_connection.simulate_connection_lost()
+    mock_modbus_unit.fail_requests(ModbusConnectionError())
 
     with pytest.raises(SolarEdgeConnectionError):
         await client.advanced_power_control.set_enabled(enabled=True)
@@ -1083,46 +1083,46 @@ async def test_update_partial_block_read_raises(
 
 
 async def test_update_wraps_connection_error(
-    mock_modbus_connection: MockModbusConnection, mock_modbus_unit: MockModbusUnit
+    mock_modbus_unit: MockModbusUnit,
 ) -> None:
     """A dropped link during update surfaces as SolarEdgeConnectionError."""
     seed(mock_modbus_unit, FIXTURE)
     client = await SolarEdge.async_probe(mock_modbus_unit)
-    mock_modbus_connection.simulate_connection_lost()
+    mock_modbus_unit.fail_requests(ModbusConnectionError())
     with pytest.raises(SolarEdgeConnectionError):
         await client.async_update()
 
 
 async def test_probe_wraps_connection_error(
-    mock_modbus_connection: MockModbusConnection, mock_modbus_unit: MockModbusUnit
+    mock_modbus_unit: MockModbusUnit,
 ) -> None:
     """A dropped link during probe surfaces as SolarEdgeConnectionError."""
-    mock_modbus_connection.simulate_connection_lost()
+    mock_modbus_unit.fail_requests(ModbusConnectionError())
     with pytest.raises(SolarEdgeConnectionError):
         await SolarEdge.async_probe(mock_modbus_unit)
 
 
 async def test_write_wraps_connection_error(
-    mock_modbus_connection: MockModbusConnection, mock_modbus_unit: MockModbusUnit
+    mock_modbus_unit: MockModbusUnit,
 ) -> None:
     """A failed field write surfaces as SolarEdgeConnectionError, like reads."""
     seed(mock_modbus_unit, FIXTURE)
     client = await SolarEdge.async_probe(mock_modbus_unit)
     assert client.power_control is not None
-    mock_modbus_connection.simulate_connection_lost()
+    mock_modbus_unit.fail_requests(ModbusConnectionError())
 
     with pytest.raises(SolarEdgeConnectionError):
         await client.power_control.write("active_power_limit", 50)
 
 
 async def test_advanced_control_write_wraps_connection_error(
-    mock_modbus_connection: MockModbusConnection, mock_modbus_unit: MockModbusUnit
+    mock_modbus_unit: MockModbusUnit,
 ) -> None:
     """A failed direct control write (commit) also wraps the backend error."""
     seed(mock_modbus_unit, FIXTURE)
     client = await SolarEdge.async_probe(mock_modbus_unit)
     assert client.advanced_power_control is not None
-    mock_modbus_connection.simulate_connection_lost()
+    mock_modbus_unit.fail_requests(ModbusConnectionError())
 
     with pytest.raises(SolarEdgeConnectionError):
         await client.advanced_power_control.commit()
