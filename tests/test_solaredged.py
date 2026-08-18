@@ -1074,6 +1074,37 @@ async def test_update_blank_inverter_block_raises(
         await client.async_update()
 
 
+async def test_readings_and_settings_poll_their_own_blocks(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """Neither update method reads a block the other one owns."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+    await client.async_update()
+
+    mock_modbus_unit.read_events.clear()
+    readings = await client.async_update_readings()
+    reading_blocks = {
+        (e.register_type, e.address) for e in mock_modbus_unit.read_events
+    }
+
+    mock_modbus_unit.read_events.clear()
+    settings = await client.async_update_settings()
+    setting_blocks = {
+        (e.register_type, e.address) for e in mock_modbus_unit.read_events
+    }
+
+    assert "inverter" in readings.updated
+    assert "site_control" in settings.updated
+    assert not reading_blocks & setting_blocks
+
+    # Together they are exactly what a full poll reads.
+    mock_modbus_unit.read_events.clear()
+    await client.async_update()
+    whole = {(e.register_type, e.address) for e in mock_modbus_unit.read_events}
+    assert whole == reading_blocks | setting_blocks
+
+
 async def test_a_slow_sub_system_is_reported_once_something_answered(
     mock_modbus_unit: MockModbusUnit,
 ) -> None:

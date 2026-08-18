@@ -149,7 +149,7 @@ class SolarEdge:
             AdvancedPowerControl(unit) if advanced_power_control else None
         )
 
-        self._domains = self._build_domains(unit)
+        self._readings, self._settings = self._build_domains(unit)
 
     @property
     def components(self) -> list[Component]:
@@ -173,30 +173,35 @@ class SolarEdge:
 
         return parts
 
-    def _build_domains(self, unit: ModbusUnit) -> list[tuple[str, _Pollable]]:
+    def _build_domains(
+        self, unit: ModbusUnit
+    ) -> tuple[list[tuple[str, _Pollable]], list[tuple[str, _Pollable]]]:
         """Group the components into the units a single read can lose.
 
-        Each entry is polled on its own, so a block one sub-system refuses
-        cannot blank the rest. Two components share a read only where one of
-        them already spans the other's registers, which costs nothing: the
-        export and storage control blocks overlap. Blocks that merely sit back
-        to back, like the SunSpec models tiling the inverter chain, are left
-        apart, because merging them would trade isolation for nothing.
+        Returns the readings and the settings apart. Each entry is polled on
+        its own, so a block one sub-system refuses cannot blank the rest. Two
+        components share a read only where one of them already spans the
+        other's registers, which costs nothing: the export and storage control
+        blocks overlap. Blocks that merely sit back to back, like the SunSpec
+        models tiling the inverter chain, are left apart, because merging them
+        would trade isolation for nothing.
         """
-        domains: list[tuple[str, _Pollable]] = [
+        readings: list[tuple[str, _Pollable]] = [
             ("common", self.common),
             ("inverter", self.inverter),
         ]
         if self.mmppt is not None:
-            domains.append(("mmppt", self.mmppt))
+            readings.append(("mmppt", self.mmppt))
 
-        domains.extend(
+        readings.extend(
             (f"meter_{index}", meter) for index, meter in enumerate(self.meters, 1)
         )
-        domains.extend(
+        readings.extend(
             (f"battery_{index}", battery)
             for index, battery in enumerate(self.batteries, 1)
         )
+
+        settings: list[tuple[str, _Pollable]] = []
 
         # The export control block's read spans the storage control block, so
         # the two are read together for the price of one.
@@ -206,17 +211,17 @@ class SolarEdge:
             if control is not None
         ]
         if len(overlapping) > 1:
-            domains.append(("site_control", ComponentGroup(unit, overlapping)))
+            settings.append(("site_control", ComponentGroup(unit, overlapping)))
         elif overlapping:
             name = "storage_control" if self.storage_control else "export_control"
-            domains.append((name, overlapping[0]))
+            settings.append((name, overlapping[0]))
 
         if self.power_control is not None:
-            domains.append(("power_control", self.power_control))
+            settings.append(("power_control", self.power_control))
         if self.advanced_power_control is not None:
-            domains.append(("advanced_power_control", self.advanced_power_control))
+            settings.append(("advanced_power_control", self.advanced_power_control))
 
-        return domains
+        return readings, settings
 
     @property
     def is_ev_charger(self) -> bool | None:
@@ -234,18 +239,36 @@ class SolarEdge:
             return None
         return model.startswith(EV_CHARGER_MODEL_PREFIX)
 
-    async def async_update(self) -> UpdateReport:
-        """Refresh every component, each on its own, and report what refreshed.
+    async def async_update_readings(self) -> UpdateReport:
+        """Refresh what the device measures: the inverter, meters and batteries.
 
-        A sub-system whose block the device refuses keeps its previous values
-        while the rest still refresh, so one failing meter or battery no longer
-        blanks the inverter. The refusal rides along on the returned report.
+        Everything that moves on its own. The control blocks are not in here,
+        so a caller polling readings alone sees the settings it last read.
+        """
+        return await self._async_poll(self._readings)
+
+    async def async_update_settings(self) -> UpdateReport:
+        """Refresh the control blocks: storage, export and power control.
+
+        These change when something writes them, not on their own, so a caller
+        may poll them on a slower interval than the readings, and again after
+        writing one.
+        """
+        return await self._async_poll(self._settings)
+
+    async def async_update(self) -> UpdateReport:
+        """Refresh readings and settings together, in one report.
+
+        For a caller that does not want to schedule the two apart. A sub-system
+        whose block the device refuses keeps its previous values while the rest
+        still refresh, so one failing meter or battery no longer blanks the
+        inverter. The refusal rides along on the returned report.
 
         Raises :class:`SolarEdgeConnectionError` when the link is gone, when
         nothing answered at all, or when the device answers without a valid
         inverter identity.
         """
-        report = await self._async_poll()
+        report = await self._async_poll([*self._readings, *self._settings])
 
         # The inverter model id is always populated on a real device. A device
         # that answers the poll but reports a bogus identity (a zero or unknown
@@ -257,7 +280,7 @@ class SolarEdge:
 
         return report
 
-    async def _async_poll(self) -> UpdateReport:
+    async def _async_poll(self, domains: list[tuple[str, _Pollable]]) -> UpdateReport:
         """Read each failure domain on its own, collecting what happened.
 
         A dead link aborts the poll: every remaining domain would only wait for
@@ -269,7 +292,7 @@ class SolarEdge:
         updated: set[str] = set()
         failed: dict[str, SolarEdgeError] = {}
 
-        for name, target in self._domains:
+        for name, target in domains:
             try:
                 await target.async_update()
             except ModbusConnectionError as err:
