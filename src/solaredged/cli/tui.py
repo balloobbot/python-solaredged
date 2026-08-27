@@ -396,8 +396,16 @@ class SolarEdgeTuiApp(App[None]):
             self.query_one("#status", StatusWidget).update_client(self._client)
             self.query_one("#info", InfoWidget).update_client(self._client)
 
-            if (power := self._client.inverter.ac_power) is not None:
-                self._power_history.append(power)
+            # Only a fresh reading becomes history. The deque is bounded and the
+            # graph labels its last point as the current power, so a value the
+            # inverter did not just report would draw a flat line that reads as
+            # real production, and would evict a genuine sample to make room.
+            fresh_power = (
+                self._client.inverter.ac_power if "inverter" in report.updated else None
+            )
+            if fresh_power is not None:
+                self._power_history.append(fresh_power)
+
             self._update_graph()
 
             self._poll_count += 1
