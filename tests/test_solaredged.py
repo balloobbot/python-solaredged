@@ -1074,6 +1074,45 @@ async def test_update_blank_inverter_block_raises(
         await client.async_update()
 
 
+async def test_blank_inverter_identity_is_caught_by_the_split_poll_too(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """The identity guard covers async_update_readings, not only a whole poll."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+    mock_modbus_unit.holding[40069] = 0  # inverter DID -> not a member -> None
+
+    with pytest.raises(SolarEdgeConnectionError, match="no valid inverter data"):
+        await client.async_update_readings()
+
+
+async def test_a_poll_that_refreshed_nothing_raises(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """Every sub-system refused means every value is stale, so the poll raises."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = await SolarEdge.async_probe(mock_modbus_unit)
+    await client.async_update()
+
+    mock_modbus_unit.fail_requests(IllegalDataAddressError())
+
+    with pytest.raises(SolarEdgeConnectionError, match="No sub-system answered"):
+        await client.async_update()
+
+
+async def test_a_device_without_the_asked_for_blocks_reports_empty(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    """No control blocks at all is an empty report, not a failed poll."""
+    seed(mock_modbus_unit, FIXTURE)
+    client = SolarEdge(mock_modbus_unit)  # the layout without any control block
+
+    report = await client.async_update_settings()
+
+    assert report.complete
+    assert not report.updated
+
+
 async def test_read_raw_covers_the_detected_layout(
     mock_modbus_unit: MockModbusUnit,
 ) -> None:

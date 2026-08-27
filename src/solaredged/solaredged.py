@@ -81,8 +81,11 @@ _LISTS = frozenset({"meters", "batteries"})
 class UpdateReport:
     """What one poll refreshed, named by sub-system.
 
-    A sub-system in ``failed`` kept the values it had. A dead link never
-    appears here: the poll raises rather than report partial silence.
+    A sub-system in ``failed`` kept the values it had: a read plan decodes
+    nothing until every one of its blocks came back. The exception is a
+    repeating group that grew, where the rows read before the failure are
+    already decoded. A dead link never appears here, and neither does a poll
+    that refreshed nothing: both raise rather than report total silence.
     """
 
     updated: set[str]
@@ -218,16 +221,7 @@ class SolarEdge:
 
     async def async_update(self) -> UpdateReport:
         """Refresh readings and settings together, in one report."""
-        report = await self._async_poll((*_READINGS, *_SETTINGS))
-
-        # A device that answers the poll but reports a bogus identity (a zero
-        # or unknown model id decoding to None) would otherwise present as a
-        # silently-blank inverter.
-        if "inverter" in report.updated and self.inverter.did is None:
-            msg = "Device returned no valid inverter data"
-            raise SolarEdgeConnectionError(msg)
-
-        return report
+        return await self._async_poll((*_READINGS, *_SETTINGS))
 
     async def _async_poll(self, names: tuple[str, ...]) -> UpdateReport:
         """Read each sub-system on its own, collecting what happened."""
@@ -248,6 +242,23 @@ class SolarEdge:
                 failed[name] = SolarEdgeConnectionError(str(err))
             else:
                 updated.add(name)
+
+        # A poll that refreshed nothing is a failed poll, not a report of one.
+        # Every value the caller can read is stale, so say so the way a dead
+        # link does. An empty `failed` means this device simply has none of the
+        # sub-systems asked for, which is not a failure.
+        if failed and not updated:
+            raise SolarEdgeConnectionError(
+                "No sub-system answered: " + "; ".join(map(str, failed.values()))
+            )
+
+        # A device that answers the poll but reports a bogus identity (a zero
+        # or unknown model id decoding to None) would otherwise present as a
+        # silently-blank inverter. Checked here so the split entry points get
+        # it too, not only a whole-device poll.
+        if "inverter" in updated and self.inverter.did is None:
+            msg = "Device returned no valid inverter data"
+            raise SolarEdgeConnectionError(msg)
 
         return UpdateReport(updated=updated, failed=failed)
 
