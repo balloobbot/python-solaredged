@@ -54,6 +54,8 @@ if TYPE_CHECKING:
     from modbus_connection import ModbusUnit
     from modbus_connection.model import Component
 
+    _Pollable = Component | ComponentGroup
+
 _METER_DIDS = frozenset(
     {
         SunSpecDID.SINGLE_PHASE_METER,
@@ -63,15 +65,11 @@ _METER_DIDS = frozenset(
     }
 )
 
-
-if TYPE_CHECKING:
-    _Pollable = Component | ComponentGroup
-
 # Sub-systems polled on their own, named by the attribute holding each. A name
 # holding None is absent on this device; one holding a list is polled per item,
 # so a single failing meter cannot blank the others.
 _READINGS = ("common", "inverter", "mmppt", "meters", "batteries")
-_SETTINGS = ("site_control", "power_control", "advanced_power_control")
+_SETTINGS = ("_site_control", "power_control", "advanced_power_control")
 
 # The names above holding a list of sub-systems rather than one.
 _LISTS = frozenset({"meters", "batteries"})
@@ -166,12 +164,18 @@ class SolarEdge:
         # the two are read together for the price of one. Blocks that merely
         # sit back to back are left apart, which buys failure isolation for
         # nothing.
-        overlapping = [c for c in (self.storage_control, self.export_control) if c]
-        self.site_control: _Pollable | None = (
-            ComponentGroup(unit, overlapping) if len(overlapping) > 1 else None
-        )
-        if self.site_control is None and overlapping:
-            self.site_control = overlapping[0]
+        overlapping = [
+            control
+            for control in (self.storage_control, self.export_control)
+            if control is not None
+        ]
+        self._site_control: _Pollable | None
+        if len(overlapping) > 1:
+            self._site_control = ComponentGroup(unit, overlapping)
+        elif overlapping:
+            self._site_control = overlapping[0]
+        else:
+            self._site_control = None
 
     @property
     def components(self) -> list[Component]:
@@ -265,13 +269,15 @@ class SolarEdge:
     def _targets(self, names: tuple[str, ...]) -> Iterator[tuple[str, _Pollable]]:
         """Yield the named sub-systems, skipping the ones this device lacks."""
         for name in names:
+            # An internal poll target still reports under a clean name.
+            key = name.lstrip("_")
             if name in _LISTS:
                 parts: list[_Pollable] = getattr(self, name)
-                yield from ((f"{name}[{i}]", part) for i, part in enumerate(parts))
+                yield from ((f"{key}[{i}]", part) for i, part in enumerate(parts))
                 continue
             target: _Pollable | None = getattr(self, name)
             if target is not None:
-                yield name, target
+                yield key, target
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
         """Every register this device reads, undecoded, for diagnostics."""
