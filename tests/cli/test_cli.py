@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from solaredged.cli import _grid_display, _on_off, _safe, cli
 from solaredged.const import (
+    POWER_CONTROL_BASE,
     InverterStatus,
     StorageChargePolicy,
     StorageControlMode,
@@ -95,6 +96,40 @@ class _PrunedConnection:
             await self._inner.close()
 
 
+class _BlockRefusingUnit:
+    """Answer a single-register probe, but refuse a block read spanning a base.
+
+    A device that presents a block and then refuses to serve it, which is what
+    makes one sub-system fail a poll the rest of the device answers.
+    """
+
+    def __init__(self, inner: Any, base: int) -> None:
+        self._inner = inner
+        self._base = base
+
+    async def read_holding_registers(self, address: int, count: int) -> list[int]:
+        if count > 1 and address <= self._base < address + count:
+            raise IllegalDataAddressError
+        return await self._inner.read_holding_registers(address, count)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+class _BlockRefusingConnection:
+    """A connection whose unit probes clean but refuses one block on the poll."""
+
+    def __init__(self, inner: MockModbusConnection, base: int) -> None:
+        self._inner = inner
+        self._base = base
+
+    def for_unit(self, unit: int) -> _BlockRefusingUnit:
+        return _BlockRefusingUnit(self._inner.for_unit(unit), self._base)
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+
 class _Empty:
     """A unit that answers every read with an illegal-data-address."""
 
@@ -129,6 +164,41 @@ def test_info_json() -> None:
     assert payload["common"]["model"] == "SE17K-RW0T0BNN4"
     assert payload["inverter"]["status"] == int(InverterStatus.PRODUCING)
     assert payload["meters"] == []
+
+
+@pytest.fixture
+def refuse_power_control(
+    monkeypatch: pytest.MonkeyPatch, se17k_connection: MockModbusConnection
+) -> None:
+    """Patch the CLI's ``connect_tcp`` to a device that refuses power control."""
+    conn = _BlockRefusingConnection(se17k_connection, POWER_CONTROL_BASE)
+
+    async def _fake_connect(_host: str, *, port: int = 1502) -> object:
+        assert port
+        return conn
+
+    monkeypatch.setattr("solaredged.cli.connect_tcp", _fake_connect)
+
+
+@pytest.mark.usefixtures("refuse_power_control")
+def test_info_json_names_a_failed_sub_system() -> None:
+    """A sub-system that failed the poll is named, not left as silent nulls."""
+    result = runner.invoke(cli, ["info", "--host", "inverter.local", "--json"])
+    assert result.exit_code == 0
+
+    # stdout carries only JSON; the warning went to stderr.
+    payload = json.loads(result.stdout)
+    assert "power_control" in payload["failed"]
+    assert "Could not read" not in result.stdout
+
+
+@pytest.mark.usefixtures("refuse_power_control")
+def test_info_warns_about_a_failed_sub_system_on_stderr() -> None:
+    """The warning names the sub-system, on stderr so it cannot corrupt output."""
+    result = runner.invoke(cli, ["info", "--host", "inverter.local", "--json"])
+
+    assert "Could not read" in result.stderr
+    assert "power_control" in result.stderr
 
 
 @pytest.mark.usefixtures("patch_connect")

@@ -391,7 +391,7 @@ class SolarEdgeTuiApp(App[None]):
                     self._connection = connection
                     self._client = client
 
-                await self._client.async_update()
+                report = await self._client.async_update()
 
             self.query_one("#status", StatusWidget).update_client(self._client)
             self.query_one("#info", InfoWidget).update_client(self._client)
@@ -401,8 +401,18 @@ class SolarEdgeTuiApp(App[None]):
             self._update_graph()
 
             self._poll_count += 1
+
+            # A sub-system that failed this poll still shows its last values,
+            # so name it: otherwise a frozen reading looks like a live one.
+            stale = ""
+            if not report.complete:
+                stale = (
+                    f"  •  [yellow]⚠️  stale: {', '.join(sorted(report.failed))}"
+                    "[/yellow]"
+                )
+
             status_bar.update(
-                f"  Poll #{self._poll_count} • every {POLL_INTERVAL}s"
+                f"  Poll #{self._poll_count} • every {POLL_INTERVAL}s{stale}"
                 "  •  [dim]l[/dim] limit  [dim]c[/dim] cosφ  [dim]b[/dim] backup"
                 "  [dim]s[/dim] storage  [dim]r[/dim] refresh  [dim]q[/dim] quit"
             )
